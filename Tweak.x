@@ -5,6 +5,12 @@
 
 @interface SBHomeScreenViewController : UIViewController
 @end
+@interface STUIStatusBarWifiSignalView : UIView
+@end
+@interface STUIStatusBarBatteryView : UIView
+@end
+@interface STUIStatusBarDualCellularSignalView : UIView
+@end
 
 #define GB_SIZE 38.0
 #define GB_R 16.0
@@ -12,10 +18,13 @@
 #define GB_Y 36.0
 
 static UIWindow *win;
-static CAShapeLayer *trackLayer, *fillLayer;
+static CAShapeLayer *trackLayer, *fillLayer, *wf1, *wf2, *wf3;
 static UIImageView *wifiView, *boltView;
 static NSMutableArray<CALayer *> *dots;
 static NSDate *startDate;
+static __weak UIView *gWifi;
+static __weak UIView *gBatt;
+static __weak UIView *gCell;
 
 static CGFloat rad(CGFloat deg) { return deg * M_PI / 180.0; }
 
@@ -46,6 +55,19 @@ static BOOL headphones(void) {
     return NO;
 }
 
+static int wifiBars(void) {
+    UIView *v = gWifi;
+    if (!v || ![v respondsToSelector:NSSelectorFromString(@"numberOfActiveBars")]) return 3;
+    int n = (int)[[v valueForKey:@"numberOfActiveBars"] integerValue];
+    return n < 0 ? 0 : (n > 3 ? 3 : n);
+}
+
+static void addFrame(UIView *v, CGRect *u) {
+    if (!v || !v.window || !v.superview) return;
+    CGRect r = [v.superview convertRect:v.frame toView:nil];
+    *u = CGRectIsNull(*u) ? r : CGRectUnion(*u, r);
+}
+
 static void update(void) {
     UIDevice *d = UIDevice.currentDevice;
     float lvl = d.batteryLevel;
@@ -67,15 +89,33 @@ static void update(void) {
 
     BOOL wifi, cell;
     readNet(&wifi, &cell);
-    NSString *name = wifi ? @"wifi" : (cell ? @"antenna.radiowaves.left.and.right" : @"wifi.slash");
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightBold];
-    wifiView.image = [UIImage systemImageNamed:name withConfiguration:cfg];
+    int bars = wifi ? wifiBars() : 0;
+    wf1.hidden = !wifi;
+    wf2.hidden = !wifi;
+    wf3.hidden = !wifi;
+    wf1.opacity = bars >= 1 ? 1 : 0.3;
+    wf2.opacity = bars >= 2 ? 1 : 0.3;
+    wf3.opacity = bars >= 3 ? 1 : 0.3;
+    wifiView.hidden = wifi;
+    if (!wifi) {
+        NSString *name = cell ? @"antenna.radiowaves.left.and.right" : @"wifi.slash";
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightBold];
+        wifiView.image = [UIImage systemImageNamed:name withConfiguration:cfg];
+    }
 
     BOOL demo = [[NSDate date] timeIntervalSinceDate:startDate] < 6;
     BOOL on[4] = { NO, NO, NO, headphones() };
     NSArray<UIColor *> *cols = @[blue, orange, green, purple];
     for (int i = 0; i < 4; i++) {
         dots[i].backgroundColor = ((on[i] || demo) ? cols[i] : dim).CGColor;
+    }
+
+    CGRect u = CGRectNull;
+    addFrame(gWifi, &u);
+    addFrame(gBatt, &u);
+    addFrame(gCell, &u);
+    if (!CGRectIsNull(u)) {
+        win.frame = CGRectMake(CGRectGetMidX(u) - GB_SIZE / 2, CGRectGetMidY(u) - GB_SIZE / 2, GB_SIZE, GB_SIZE);
     }
 }
 
@@ -84,6 +124,17 @@ static CAShapeLayer *makeArc(UIBezierPath *arc) {
     l.path = arc.CGPath;
     l.fillColor = UIColor.clearColor.CGColor;
     l.lineWidth = 3;
+    l.lineCap = kCALineCapRound;
+    return l;
+}
+
+static CAShapeLayer *wifiArc(CGPoint base, CGFloat r) {
+    CAShapeLayer *l = [CAShapeLayer layer];
+    l.path = [UIBezierPath bezierPathWithArcCenter:base radius:r
+        startAngle:rad(-135) endAngle:rad(-45) clockwise:YES].CGPath;
+    l.fillColor = UIColor.clearColor.CGColor;
+    l.strokeColor = UIColor.whiteColor.CGColor;
+    l.lineWidth = 2;
     l.lineCap = kCALineCapRound;
     return l;
 }
@@ -109,12 +160,24 @@ static void setupWindow(UIWindowScene *scene) {
     [root.layer addSublayer:trackLayer];
     [root.layer addSublayer:fillLayer];
 
+    CGPoint base = CGPointMake(c.x, 24);
+    wf1 = [CAShapeLayer layer];
+    wf1.path = [UIBezierPath bezierPathWithArcCenter:base radius:1.8
+        startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
+    wf1.fillColor = UIColor.whiteColor.CGColor;
+    wf1.strokeColor = UIColor.clearColor.CGColor;
+    wf2 = wifiArc(base, 5.0);
+    wf3 = wifiArc(base, 9.0);
+    [root.layer addSublayer:wf1];
+    [root.layer addSublayer:wf2];
+    [root.layer addSublayer:wf3];
+
     wifiView = [[UIImageView alloc] initWithFrame:CGRectMake(c.x - 9, 15, 18, 12)];
     wifiView.contentMode = UIViewContentModeScaleAspectFit;
     wifiView.tintColor = UIColor.whiteColor;
     [root addSubview:wifiView];
 
-    boltView = [[UIImageView alloc] initWithFrame:CGRectMake(c.x - 4, 6, 8, 8)];
+    boltView = [[UIImageView alloc] initWithFrame:CGRectMake(c.x - 4, 5, 8, 8)];
     boltView.contentMode = UIViewContentModeScaleAspectFit;
     boltView.tintColor = [UIColor colorWithRed:0.20 green:0.84 blue:0.42 alpha:1];
     boltView.image = [UIImage systemImageNamed:@"bolt.fill"];
@@ -144,4 +207,31 @@ static void setupWindow(UIWindowScene *scene) {
     UIWindowScene *s = self.view.window.windowScene;
     if (s) setupWindow(s);
 }
+%end
+
+%hook STUIStatusBarWifiSignalView
+- (void)didMoveToWindow {
+    %orig;
+    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gWifi = self;
+    self.alpha = 0;
+}
+- (void)setAlpha:(CGFloat)a { %orig(0); }
+%end
+
+%hook STUIStatusBarBatteryView
+- (void)didMoveToWindow {
+    %orig;
+    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gBatt = self;
+    self.alpha = 0;
+}
+- (void)setAlpha:(CGFloat)a { %orig(0); }
+%end
+
+%hook STUIStatusBarDualCellularSignalView
+- (void)didMoveToWindow {
+    %orig;
+    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gCell = self;
+    self.alpha = 0;
+}
+- (void)setAlpha:(CGFloat)a { %orig(0); }
 %end
