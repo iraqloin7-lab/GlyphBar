@@ -6,5 +6,5 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = GlyphBar
 GlyphBar_FILES = Tweak.x
 GlyphBar_CFLAGS = -fobjc-arc
-GlyphBar_FRAMEWORKS = UIKit AVFoundation
+GlyphBar_FRAMEWORKS = UIKit AVFoundation IOKit
 include $(THEOS_MAKE_PATH)/tweak.mk
