@@ -1,8 +1,17 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <mach/mach.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 
+extern CFMutableDictionaryRef IOServiceMatching(const char *name);
+extern mach_port_t IOServiceGetMatchingService(mach_port_t mainPort, CFDictionaryRef matching);
+extern kern_return_t IORegistryEntryCreateCFProperties(mach_port_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, uint32_t options);
+extern kern_return_t IOObjectRelease(mach_port_t object);
+
+@interface UIWindow (GBFind)
++ (NSArray *)allWindowsIncludingInternalWindows:(BOOL)a onlyVisibleWindows:(BOOL)b;
+@end
 @interface SBHomeScreenViewController : UIViewController
 @end
 @interface STUIStatusBarWifiSignalView : UIView
@@ -12,14 +21,18 @@
 @interface STUIStatusBarDualCellularSignalView : UIView
 @end
 
-#define GB_SIZE 38.0
-#define GB_R 16.0
-#define GB_X_FROM_RIGHT 10.0
-#define GB_Y 36.0
+#define PW 80.0
+#define PH 28.0
+#define PAD 2.0
+#define LW 2.5
+#define DOT_D 3.4
+#define DOT_STEP 8.0
+#define GAP_HALF 19.0
 
 static UIWindow *win;
 static CAShapeLayer *trackLayer, *fillLayer, *wf1, *wf2, *wf3;
 static UIImageView *wifiView, *boltView;
+static UILabel *pctLabel;
 static NSMutableArray<CALayer *> *dots;
 static NSDate *startDate;
 static __weak UIView *gWifi;
@@ -43,6 +56,20 @@ static void readNet(BOOL *wifi, BOOL *cell) {
     freeifaddrs(ifa);
 }
 
+static int readPercent(void) {
+    int pct = -1;
+    mach_port_t svc = IOServiceGetMatchingService(0, IOServiceMatching("IOPMPowerSource"));
+    if (!svc) return -1;
+    CFMutableDictionaryRef props = NULL;
+    if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
+        NSDictionary *d = (__bridge_transfer NSDictionary *)props;
+        NSNumber *c = d[@"CurrentCapacity"];
+        if (c) pct = c.intValue;
+    }
+    IOObjectRelease(svc);
+    return pct;
+}
+
 static BOOL headphones(void) {
     AVAudioSessionRouteDescription *r = [AVAudioSession sharedInstance].currentRoute;
     for (AVAudioSessionPortDescription *o in r.outputs) {
@@ -53,6 +80,26 @@ static BOOL headphones(void) {
             [t isEqualToString:AVAudioSessionPortBluetoothLE]) return YES;
     }
     return NO;
+}
+
+static UIView *findView(UIView *v, NSString *cn, int depth) {
+    if (depth > 8) return nil;
+    if ([NSStringFromClass(v.class) isEqualToString:cn]) return v;
+    for (UIView *s in v.subviews) {
+        UIView *r = findView(s, cn, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+static void locate(void) {
+    if (gWifi && gBatt && gCell) return;
+    for (UIWindow *w in [UIWindow allWindowsIncludingInternalWindows:YES onlyVisibleWindows:YES]) {
+        if (![NSStringFromClass(w.class) isEqualToString:@"SBStatusBarWindow"]) continue;
+        if (!gWifi) gWifi = findView(w, @"STUIStatusBarWifiSignalView", 0);
+        if (!gBatt) gBatt = findView(w, @"STUIStatusBarBatteryView", 0);
+        if (!gCell) gCell = findView(w, @"STUIStatusBarDualCellularSignalView", 0);
+    }
 }
 
 static int wifiBars(void) {
@@ -69,9 +116,13 @@ static void addFrame(UIView *v, CGRect *u) {
 }
 
 static void update(void) {
+    locate();
     UIDevice *d = UIDevice.currentDevice;
-    float lvl = d.batteryLevel;
-    if (lvl < 0) lvl = 1;
+    int pct = readPercent();
+    if (pct < 0 || pct > 100) {
+        float l = d.batteryLevel;
+        pct = l < 0 ? 100 : (int)lroundf(l * 100);
+    }
     BOOL chg = d.batteryState == UIDeviceBatteryStateCharging || d.batteryState == UIDeviceBatteryStateFull;
 
     UIColor *green = [UIColor colorWithRed:0.20 green:0.84 blue:0.42 alpha:1];
@@ -80,12 +131,14 @@ static void update(void) {
     UIColor *orange = [UIColor colorWithRed:1.0 green:0.62 blue:0.04 alpha:1];
     UIColor *purple = [UIColor colorWithRed:0.75 green:0.35 blue:0.95 alpha:1];
     UIColor *dim = [UIColor colorWithWhite:1 alpha:0.25];
-    UIColor *ring = chg ? green : (lvl <= 0.2 ? red : [UIColor colorWithWhite:0.9 alpha:1]);
+    UIColor *ring = chg ? green : (pct <= 20 ? red : [UIColor colorWithWhite:0.92 alpha:1]);
 
     fillLayer.strokeColor = ring.CGColor;
-    fillLayer.strokeEnd = lvl;
+    fillLayer.strokeEnd = pct / 100.0;
     trackLayer.strokeColor = (chg ? [green colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1 alpha:0.22]).CGColor;
     boltView.hidden = !chg;
+    pctLabel.text = [NSString stringWithFormat:@"%d", pct];
+    pctLabel.textColor = chg ? green : (pct <= 20 ? red : UIColor.whiteColor);
 
     BOOL wifi, cell;
     readNet(&wifi, &cell);
@@ -115,15 +168,32 @@ static void update(void) {
     addFrame(gBatt, &u);
     addFrame(gCell, &u);
     if (!CGRectIsNull(u)) {
-        win.frame = CGRectMake(CGRectGetMidX(u) - GB_SIZE / 2, CGRectGetMidY(u) - GB_SIZE / 2, GB_SIZE, GB_SIZE);
+        CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD;
+        win.frame = CGRectMake(CGRectGetMidX(u) - W / 2, CGRectGetMidY(u) - H / 2, W, H);
     }
 }
 
-static CAShapeLayer *makeArc(UIBezierPath *arc) {
+static UIBezierPath *pillPath(void) {
+    CGRect r = CGRectMake(PAD + LW / 2, PAD + LW / 2, PW - LW, PH - LW);
+    CGFloat R = r.size.height / 2;
+    CGFloat cx = CGRectGetMidX(r), my = CGRectGetMidY(r);
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    [p moveToPoint:CGPointMake(cx - GAP_HALF, CGRectGetMaxY(r))];
+    [p addLineToPoint:CGPointMake(CGRectGetMinX(r) + R, CGRectGetMaxY(r))];
+    [p addArcWithCenter:CGPointMake(CGRectGetMinX(r) + R, my) radius:R
+        startAngle:M_PI_2 endAngle:3 * M_PI_2 clockwise:YES];
+    [p addLineToPoint:CGPointMake(CGRectGetMaxX(r) - R, CGRectGetMinY(r))];
+    [p addArcWithCenter:CGPointMake(CGRectGetMaxX(r) - R, my) radius:R
+        startAngle:3 * M_PI_2 endAngle:5 * M_PI_2 clockwise:YES];
+    [p addLineToPoint:CGPointMake(cx + GAP_HALF, CGRectGetMaxY(r))];
+    return p;
+}
+
+static CAShapeLayer *makeArc(UIBezierPath *path) {
     CAShapeLayer *l = [CAShapeLayer layer];
-    l.path = arc.CGPath;
+    l.path = path.CGPath;
     l.fillColor = UIColor.clearColor.CGColor;
-    l.lineWidth = 3;
+    l.lineWidth = LW;
     l.lineCap = kCALineCapRound;
     return l;
 }
@@ -141,9 +211,9 @@ static CAShapeLayer *wifiArc(CGPoint base, CGFloat r) {
 
 static void setupWindow(UIWindowScene *scene) {
     if (win) return;
-    CGFloat w = scene.screen.bounds.size.width;
+    CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD;
     win = [[UIWindow alloc] initWithWindowScene:scene];
-    win.frame = CGRectMake(w - GB_SIZE - GB_X_FROM_RIGHT, GB_Y, GB_SIZE, GB_SIZE);
+    win.frame = CGRectMake(8, 6, W, H);
     win.windowLevel = 10000;
     win.userInteractionEnabled = NO;
     win.backgroundColor = UIColor.clearColor;
@@ -151,45 +221,48 @@ static void setupWindow(UIWindowScene *scene) {
     UIView *root = [[UIView alloc] initWithFrame:win.bounds];
     [win addSubview:root];
 
-    CGPoint c = CGPointMake(GB_SIZE / 2, GB_SIZE / 2);
-    UIBezierPath *arc = [UIBezierPath bezierPathWithArcCenter:c radius:GB_R
-        startAngle:rad(120) endAngle:rad(420) clockwise:YES];
-    trackLayer = makeArc(arc);
-    fillLayer = makeArc(arc);
+    UIBezierPath *pill = pillPath();
+    trackLayer = makeArc(pill);
+    fillLayer = makeArc(pill);
     fillLayer.strokeEnd = 1;
     [root.layer addSublayer:trackLayer];
     [root.layer addSublayer:fillLayer];
 
-    CGPoint base = CGPointMake(c.x, 24);
+    CGPoint base = CGPointMake(PAD + PW - 20, PAD + 18);
     wf1 = [CAShapeLayer layer];
     wf1.path = [UIBezierPath bezierPathWithArcCenter:base radius:1.8
         startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
     wf1.fillColor = UIColor.whiteColor.CGColor;
     wf1.strokeColor = UIColor.clearColor.CGColor;
-    wf2 = wifiArc(base, 5.0);
+    wf2 = wifiArc(base, 5.5);
     wf3 = wifiArc(base, 9.0);
     [root.layer addSublayer:wf1];
     [root.layer addSublayer:wf2];
     [root.layer addSublayer:wf3];
 
-    wifiView = [[UIImageView alloc] initWithFrame:CGRectMake(c.x - 9, 15, 18, 12)];
+    wifiView = [[UIImageView alloc] initWithFrame:CGRectMake(base.x - 9, PAD + 8, 18, 12)];
     wifiView.contentMode = UIViewContentModeScaleAspectFit;
     wifiView.tintColor = UIColor.whiteColor;
     [root addSubview:wifiView];
 
-    boltView = [[UIImageView alloc] initWithFrame:CGRectMake(c.x - 4, 5, 8, 8)];
+    pctLabel = [[UILabel alloc] initWithFrame:CGRectMake(PAD + 17, PAD + 5, 28, 18)];
+    pctLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightBold];
+    pctLabel.textAlignment = NSTextAlignmentCenter;
+    pctLabel.textColor = UIColor.whiteColor;
+    [root addSubview:pctLabel];
+
+    boltView = [[UIImageView alloc] initWithFrame:CGRectMake(PAD + 8.5, PAD + 9.5, 7, 9)];
     boltView.contentMode = UIViewContentModeScaleAspectFit;
     boltView.tintColor = [UIColor colorWithRed:0.20 green:0.84 blue:0.42 alpha:1];
     boltView.image = [UIImage systemImageNamed:@"bolt.fill"];
     [root addSubview:boltView];
 
     dots = [NSMutableArray array];
-    CGFloat angs[4] = {118, 99, 81, 62};
     for (int i = 0; i < 4; i++) {
         CALayer *dl = [CALayer layer];
-        dl.bounds = CGRectMake(0, 0, 4, 4);
-        dl.cornerRadius = 2;
-        dl.position = CGPointMake(c.x + 12.5 * cos(rad(angs[i])), c.y + 12.5 * sin(rad(angs[i])));
+        dl.bounds = CGRectMake(0, 0, DOT_D, DOT_D);
+        dl.cornerRadius = DOT_D / 2;
+        dl.position = CGPointMake(PAD + PW / 2 + (i - 1.5) * DOT_STEP, PAD + PH - LW / 2);
         [root.layer addSublayer:dl];
         [dots addObject:dl];
     }
@@ -210,28 +283,16 @@ static void setupWindow(UIWindowScene *scene) {
 %end
 
 %hook STUIStatusBarWifiSignalView
-- (void)didMoveToWindow {
-    %orig;
-    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gWifi = self;
-    self.alpha = 0;
-}
+- (void)didMoveToWindow { %orig; self.alpha = 0; }
 - (void)setAlpha:(CGFloat)a { %orig(0); }
 %end
 
 %hook STUIStatusBarBatteryView
-- (void)didMoveToWindow {
-    %orig;
-    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gBatt = self;
-    self.alpha = 0;
-}
+- (void)didMoveToWindow { %orig; self.alpha = 0; }
 - (void)setAlpha:(CGFloat)a { %orig(0); }
 %end
 
 %hook STUIStatusBarDualCellularSignalView
-- (void)didMoveToWindow {
-    %orig;
-    if ([NSStringFromClass(self.window.class) isEqualToString:@"SBStatusBarWindow"]) gCell = self;
-    self.alpha = 0;
-}
+- (void)didMoveToWindow { %orig; self.alpha = 0; }
 - (void)setAlpha:(CGFloat)a { %orig(0); }
 %end
