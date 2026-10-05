@@ -125,20 +125,40 @@ static void locate(void) {
 }
 
 static BOOL contentIsDark(UILabel *l) {
-    UIColor *c = nil;
-    if (l.attributedText.length > 0) {
-        c = [l.attributedText attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL];
+    int w = (int)ceil(l.bounds.size.width);
+    int h = (int)ceil(l.bounds.size.height);
+    if (w < 2 || h < 2 || w > 200 || h > 100) return NO;
+    uint8_t *buf = calloc((size_t)w * h * 4, 1);
+    if (!buf) return NO;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NO; }
+    CGContextTranslateCTM(ctx, 0, h);
+    CGContextScaleCTM(ctx, 1, -1);
+    [l.layer renderInContext:ctx];
+    double sum = 0, alphaSum = 0;
+    for (int i = 0; i < w * h; i++) {
+        double a = buf[i * 4 + 3];
+        if (a < 40) continue;
+        double r = buf[i * 4] / a;
+        double g = buf[i * 4 + 1] / a;
+        double b = buf[i * 4 + 2] / a;
+        double lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        sum += lum * a;
+        alphaSum += a;
     }
-    if (!c) c = l.textColor;
-    if (!c) return NO;
-    c = [c resolvedColorWithTraitCollection:l.traitCollection];
-    CGFloat r = 1, g = 1, b = 1, a = 1;
-    if (![c getRed:&r green:&g blue:&b alpha:&a]) {
-        CGFloat w = 1;
-        if (![c getWhite:&w alpha:&a]) return NO;
-        r = w; g = w; b = w;
-    }
-    return (0.299 * r + 0.587 * g + 0.114 * b) < 0.5;
+    CGContextRelease(ctx);
+    free(buf);
+    if (alphaSum < 1) return NO;
+    return (sum / alphaSum) < 0.5;
+}
+
+static void halo(CALayer *l, BOOL dk) {
+    l.shadowColor = (dk ? UIColor.whiteColor : UIColor.blackColor).CGColor;
+    l.shadowOpacity = dk ? 0.3 : 0.5;
+    l.shadowRadius = 1.5;
+    l.shadowOffset = CGSizeZero;
 }
 
 static int barsOf(UIView *v, int maxBars) {
@@ -184,6 +204,13 @@ static void update(void) {
     wf1.fillColor = fg.CGColor;
     wf2.strokeColor = fg.CGColor;
     wf3.strokeColor = fg.CGColor;
+    halo(fillLayer, dk);
+    halo(wf1, dk);
+    halo(wf2, dk);
+    halo(wf3, dk);
+    for (CALayer *dl in dots) halo(dl, dk);
+    halo(pctLabel.layer, dk);
+    halo(wifiView.layer, dk);
     [CATransaction commit];
 
     boltView.hidden = !chg;
