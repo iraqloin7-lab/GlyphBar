@@ -1,5 +1,4 @@
 #import <UIKit/UIKit.h>
-#import <AVFoundation/AVFoundation.h>
 #import <mach/mach.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -27,6 +26,8 @@ extern kern_return_t IOObjectRelease(mach_port_t object);
 #define LW 2.5
 #define DOT_D 3.4
 #define DOT_STEP 8.0
+#define ROW_GAP 6.5
+#define EXTRA_H 6.0
 #define GAP_HALF 19.0
 
 static UIWindow *win;
@@ -34,10 +35,13 @@ static CAShapeLayer *trackLayer, *fillLayer, *wf1, *wf2, *wf3;
 static UIImageView *wifiView, *boltView;
 static UILabel *pctLabel;
 static NSMutableArray<CALayer *> *dots;
-static NSDate *startDate;
 static __weak UIView *gWifi;
 static __weak UIView *gBatt;
 static __weak UIView *gCell;
+static __weak UIView *gSim1;
+static __weak UIView *gSim2;
+static BOOL gExt = NO;
+static BOOL gHaveBatt = NO;
 
 static CGFloat rad(CGFloat deg) { return deg * M_PI / 180.0; }
 
@@ -58,6 +62,7 @@ static void readNet(BOOL *wifi, BOOL *cell) {
 
 static int readPercent(void) {
     int pct = -1;
+    gHaveBatt = NO;
     mach_port_t svc = IOServiceGetMatchingService(0, IOServiceMatching("IOPMPowerSource"));
     if (!svc) return -1;
     CFMutableDictionaryRef props = NULL;
@@ -65,21 +70,11 @@ static int readPercent(void) {
         NSDictionary *d = (__bridge_transfer NSDictionary *)props;
         NSNumber *c = d[@"CurrentCapacity"];
         if (c) pct = c.intValue;
+        gExt = [d[@"ExternalConnected"] boolValue];
+        gHaveBatt = YES;
     }
     IOObjectRelease(svc);
     return pct;
-}
-
-static BOOL headphones(void) {
-    AVAudioSessionRouteDescription *r = [AVAudioSession sharedInstance].currentRoute;
-    for (AVAudioSessionPortDescription *o in r.outputs) {
-        NSString *t = o.portType;
-        if ([t isEqualToString:AVAudioSessionPortHeadphones] ||
-            [t isEqualToString:AVAudioSessionPortBluetoothA2DP] ||
-            [t isEqualToString:AVAudioSessionPortBluetoothHFP] ||
-            [t isEqualToString:AVAudioSessionPortBluetoothLE]) return YES;
-    }
-    return NO;
 }
 
 static UIView *findView(UIView *v, NSString *cn, int depth) {
@@ -93,20 +88,25 @@ static UIView *findView(UIView *v, NSString *cn, int depth) {
 }
 
 static void locate(void) {
-    if (gWifi && gBatt && gCell) return;
-    for (UIWindow *w in [UIWindow allWindowsIncludingInternalWindows:YES onlyVisibleWindows:YES]) {
-        if (![NSStringFromClass(w.class) isEqualToString:@"SBStatusBarWindow"]) continue;
-        if (!gWifi) gWifi = findView(w, @"STUIStatusBarWifiSignalView", 0);
-        if (!gBatt) gBatt = findView(w, @"STUIStatusBarBatteryView", 0);
-        if (!gCell) gCell = findView(w, @"STUIStatusBarDualCellularSignalView", 0);
+    if (!(gWifi && gBatt && gCell)) {
+        for (UIWindow *w in [UIWindow allWindowsIncludingInternalWindows:YES onlyVisibleWindows:YES]) {
+            if (![NSStringFromClass(w.class) isEqualToString:@"SBStatusBarWindow"]) continue;
+            if (!gWifi) gWifi = findView(w, @"STUIStatusBarWifiSignalView", 0);
+            if (!gBatt) gBatt = findView(w, @"STUIStatusBarBatteryView", 0);
+            if (!gCell) gCell = findView(w, @"STUIStatusBarDualCellularSignalView", 0);
+        }
+    }
+    UIView *c = gCell;
+    if (c) {
+        if (!gSim1 || !gSim1.window) gSim1 = findView(c, @"STUIStatusBarCellularSmallSignalView", 0);
+        if (!gSim2 || !gSim2.window) gSim2 = findView(c, @"STUIStatusBarCellularFlatSignalView", 0);
     }
 }
 
-static int wifiBars(void) {
-    UIView *v = gWifi;
-    if (!v || ![v respondsToSelector:NSSelectorFromString(@"numberOfActiveBars")]) return 3;
+static int barsOf(UIView *v, int maxBars) {
+    if (!v || ![v respondsToSelector:NSSelectorFromString(@"numberOfActiveBars")]) return -1;
     int n = (int)[[v valueForKey:@"numberOfActiveBars"] integerValue];
-    return n < 0 ? 0 : (n > 3 ? 3 : n);
+    return n < 0 ? 0 : (n > maxBars ? maxBars : n);
 }
 
 static void addFrame(UIView *v, CGRect *u) {
@@ -123,26 +123,34 @@ static void update(void) {
         float l = d.batteryLevel;
         pct = l < 0 ? 100 : (int)lroundf(l * 100);
     }
-    BOOL chg = d.batteryState == UIDeviceBatteryStateCharging || d.batteryState == UIDeviceBatteryStateFull;
+    BOOL chg = gHaveBatt ? gExt : (d.batteryState == UIDeviceBatteryStateCharging || d.batteryState == UIDeviceBatteryStateFull);
 
     UIColor *green = [UIColor colorWithRed:0.20 green:0.84 blue:0.42 alpha:1];
     UIColor *red = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1];
-    UIColor *blue = [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1];
-    UIColor *orange = [UIColor colorWithRed:1.0 green:0.62 blue:0.04 alpha:1];
-    UIColor *purple = [UIColor colorWithRed:0.75 green:0.35 blue:0.95 alpha:1];
     UIColor *dim = [UIColor colorWithWhite:1 alpha:0.25];
     UIColor *ring = chg ? green : (pct <= 20 ? red : [UIColor colorWithWhite:0.92 alpha:1]);
 
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     fillLayer.strokeColor = ring.CGColor;
     fillLayer.strokeEnd = pct / 100.0;
     trackLayer.strokeColor = (chg ? [green colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1 alpha:0.22]).CGColor;
+    int s1 = barsOf(gSim1, 4);
+    int s2 = barsOf(gSim2, 4);
+    for (int i = 0; i < 4; i++) {
+        dots[i].backgroundColor = ((s1 > i) ? UIColor.whiteColor : dim).CGColor;
+        dots[i + 4].backgroundColor = ((s2 > i) ? UIColor.whiteColor : dim).CGColor;
+    }
+    [CATransaction commit];
+
     boltView.hidden = !chg;
     pctLabel.text = [NSString stringWithFormat:@"%d", pct];
     pctLabel.textColor = chg ? green : (pct <= 20 ? red : UIColor.whiteColor);
 
     BOOL wifi, cell;
     readNet(&wifi, &cell);
-    int bars = wifi ? wifiBars() : 0;
+    int wb = barsOf(gWifi, 3);
+    int bars = wifi ? (wb < 0 ? 3 : wb) : 0;
     wf1.hidden = !wifi;
     wf2.hidden = !wifi;
     wf3.hidden = !wifi;
@@ -156,20 +164,13 @@ static void update(void) {
         wifiView.image = [UIImage systemImageNamed:name withConfiguration:cfg];
     }
 
-    BOOL demo = [[NSDate date] timeIntervalSinceDate:startDate] < 6;
-    BOOL on[4] = { NO, NO, NO, headphones() };
-    NSArray<UIColor *> *cols = @[blue, orange, green, purple];
-    for (int i = 0; i < 4; i++) {
-        dots[i].backgroundColor = ((on[i] || demo) ? cols[i] : dim).CGColor;
-    }
-
     CGRect u = CGRectNull;
     addFrame(gWifi, &u);
     addFrame(gBatt, &u);
     addFrame(gCell, &u);
     if (!CGRectIsNull(u)) {
-        CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD;
-        win.frame = CGRectMake(CGRectGetMidX(u) - W / 2, CGRectGetMidY(u) - H / 2, W, H);
+        CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD + EXTRA_H;
+        win.frame = CGRectMake(CGRectGetMidX(u) - W / 2, CGRectGetMidY(u) - (PAD + PH / 2), W, H);
     }
 }
 
@@ -211,7 +212,7 @@ static CAShapeLayer *wifiArc(CGPoint base, CGFloat r) {
 
 static void setupWindow(UIWindowScene *scene) {
     if (win) return;
-    CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD;
+    CGFloat W = PW + 2 * PAD, H = PH + 2 * PAD + EXTRA_H;
     win = [[UIWindow alloc] initWithWindowScene:scene];
     win.frame = CGRectMake(8, 6, W, H);
     win.windowLevel = 10000;
@@ -258,20 +259,22 @@ static void setupWindow(UIWindowScene *scene) {
     [root addSubview:boltView];
 
     dots = [NSMutableArray array];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
+        int col = i % 4, row = i / 4;
         CALayer *dl = [CALayer layer];
         dl.bounds = CGRectMake(0, 0, DOT_D, DOT_D);
         dl.cornerRadius = DOT_D / 2;
-        dl.position = CGPointMake(PAD + PW / 2 + (i - 1.5) * DOT_STEP, PAD + PH - LW / 2);
+        dl.position = CGPointMake(PAD + PW / 2 + (col - 1.5) * DOT_STEP, PAD + PH - LW / 2 + row * ROW_GAP);
         [root.layer addSublayer:dl];
         [dots addObject:dl];
     }
 
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
-    startDate = [NSDate date];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIDeviceBatteryStateDidChangeNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){ update(); }];
     win.hidden = NO;
     update();
-    [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){ update(); }];
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t){ update(); }];
 }
 
 %hook SBHomeScreenViewController
