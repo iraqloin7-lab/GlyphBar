@@ -1,0 +1,9 @@
+Package: com.example.glyphbar
+Name: GlyphBar
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Unified status glyph
+Maintainer: me
+Author: me
+Section: Tweaks
+Depends: mobilesubstrate
