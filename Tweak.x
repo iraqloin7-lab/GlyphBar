@@ -40,6 +40,7 @@ static __weak UIView *gBatt;
 static __weak UIView *gCell;
 static __weak UIView *gSim1;
 static __weak UIView *gSim2;
+static __weak UILabel *gTime;
 static BOOL gExt = NO;
 static BOOL gHaveBatt = NO;
 
@@ -87,6 +88,19 @@ static UIView *findView(UIView *v, NSString *cn, int depth) {
     return nil;
 }
 
+static UILabel *findTime(UIView *v, int depth) {
+    if (depth > 9) return nil;
+    if ([v isKindOfClass:UILabel.class] && [NSStringFromClass(v.class) isEqualToString:@"STUIStatusBarStringView"]) {
+        NSString *t = ((UILabel *)v).text;
+        if ([t containsString:@":"]) return (UILabel *)v;
+    }
+    for (UIView *s in v.subviews) {
+        UILabel *r = findTime(s, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
 static void locate(void) {
     if (!(gWifi && gBatt && gCell)) {
         for (UIWindow *w in [UIWindow allWindowsIncludingInternalWindows:YES onlyVisibleWindows:YES]) {
@@ -101,6 +115,30 @@ static void locate(void) {
         if (!gSim1 || !gSim1.window) gSim1 = findView(c, @"STUIStatusBarCellularSmallSignalView", 0);
         if (!gSim2 || !gSim2.window) gSim2 = findView(c, @"STUIStatusBarCellularFlatSignalView", 0);
     }
+    if (!gTime || !gTime.window) {
+        for (UIWindow *w in [UIWindow allWindowsIncludingInternalWindows:YES onlyVisibleWindows:YES]) {
+            if (![NSStringFromClass(w.class) isEqualToString:@"SBStatusBarWindow"]) continue;
+            UILabel *t = findTime(w, 0);
+            if (t) { gTime = t; break; }
+        }
+    }
+}
+
+static BOOL contentIsDark(UILabel *l) {
+    UIColor *c = nil;
+    if (l.attributedText.length > 0) {
+        c = [l.attributedText attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL];
+    }
+    if (!c) c = l.textColor;
+    if (!c) return NO;
+    c = [c resolvedColorWithTraitCollection:l.traitCollection];
+    CGFloat r = 1, g = 1, b = 1, a = 1;
+    if (![c getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat w = 1;
+        if (![c getWhite:&w alpha:&a]) return NO;
+        r = w; g = w; b = w;
+    }
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 0.5;
 }
 
 static int barsOf(UIView *v, int maxBars) {
@@ -124,28 +162,34 @@ static void update(void) {
         pct = l < 0 ? 100 : (int)lroundf(l * 100);
     }
     BOOL chg = gHaveBatt ? gExt : (d.batteryState == UIDeviceBatteryStateCharging || d.batteryState == UIDeviceBatteryStateFull);
+    BOOL dk = gTime ? contentIsDark(gTime) : NO;
 
     UIColor *green = [UIColor colorWithRed:0.20 green:0.84 blue:0.42 alpha:1];
     UIColor *red = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1];
-    UIColor *dim = [UIColor colorWithWhite:1 alpha:0.25];
-    UIColor *ring = chg ? green : (pct <= 20 ? red : [UIColor colorWithWhite:0.92 alpha:1]);
+    UIColor *fg = dk ? [UIColor colorWithWhite:0.06 alpha:1] : UIColor.whiteColor;
+    UIColor *dim = [fg colorWithAlphaComponent:0.25];
+    UIColor *ring = chg ? green : (pct <= 20 ? red : fg);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     fillLayer.strokeColor = ring.CGColor;
     fillLayer.strokeEnd = pct / 100.0;
-    trackLayer.strokeColor = (chg ? [green colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1 alpha:0.22]).CGColor;
+    trackLayer.strokeColor = (chg ? [green colorWithAlphaComponent:0.22] : [fg colorWithAlphaComponent:0.22]).CGColor;
     int s1 = barsOf(gSim1, 4);
     int s2 = barsOf(gSim2, 4);
     for (int i = 0; i < 4; i++) {
-        dots[i].backgroundColor = ((s1 > i) ? UIColor.whiteColor : dim).CGColor;
-        dots[i + 4].backgroundColor = ((s2 > i) ? UIColor.whiteColor : dim).CGColor;
+        dots[i].backgroundColor = ((s1 > i) ? fg : dim).CGColor;
+        dots[i + 4].backgroundColor = ((s2 > i) ? fg : dim).CGColor;
     }
+    wf1.fillColor = fg.CGColor;
+    wf2.strokeColor = fg.CGColor;
+    wf3.strokeColor = fg.CGColor;
     [CATransaction commit];
 
     boltView.hidden = !chg;
     pctLabel.text = [NSString stringWithFormat:@"%d", pct];
-    pctLabel.textColor = chg ? green : (pct <= 20 ? red : UIColor.whiteColor);
+    pctLabel.textColor = chg ? green : (pct <= 20 ? red : fg);
+    wifiView.tintColor = fg;
 
     BOOL wifi, cell;
     readNet(&wifi, &cell);
